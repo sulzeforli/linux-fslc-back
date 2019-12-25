@@ -16,6 +16,7 @@
 #include <linux/of_platform.h>
 #include <sound/pcm_params.h>
 #include <sound/soc.h>
+#include <linux/mfd/syscon.h>
 
 #include "fsl_esai.h"
 #include "fsl_sai.h"
@@ -23,6 +24,7 @@
 
 #include "../codecs/sgtl5000.h"
 #include "../codecs/wm8962.h"
+#include "../codecs/wm8960.h"
 
 #define RX 0
 #define TX 1
@@ -90,6 +92,7 @@ struct fsl_asoc_card_priv {
 	u32 asrc_format;
 	u32 dai_fmt;
 	char name[32];
+	struct regmap *gpr;
 };
 
 /**
@@ -400,7 +403,7 @@ static int fsl_asoc_card_late_probe(struct snd_soc_card *card)
 
 static int fsl_asoc_card_probe(struct platform_device *pdev)
 {
-	struct device_node *cpu_np, *codec_np, *asrc_np;
+	struct device_node *cpu_np, *codec_np, *asrc_np, *gpr_np;
 	struct device_node *np = pdev->dev.of_node;
 	struct platform_device *asrc_pdev = NULL;
 	struct platform_device *cpu_pdev;
@@ -443,6 +446,22 @@ static int fsl_asoc_card_probe(struct platform_device *pdev)
 	if (asrc_np)
 		asrc_pdev = of_find_device_by_node(asrc_np);
 
+	gpr_np = of_parse_phandle(np, "gpr", 0);
+	if (gpr_np) {
+		priv->gpr = syscon_node_to_regmap(gpr_np);
+		if (IS_ERR(priv->gpr)) {
+			ret = PTR_ERR(priv->gpr);
+			dev_err(&pdev->dev, "failed to get gpr regmap\n");
+			goto fail;
+		}
+		/*
+		 * for imx6ul we should set SAI2_MCLK_DIR to enable
+		 * codec MCLK
+		 */
+		if (of_device_is_compatible(np, "fsl,imx6ul-evk-wm8960"))
+			regmap_update_bits(priv->gpr, 4, 1 << 20, 1 << 20);
+	}
+
 	/* Get the MCLK rate only, and leave it controlled by CODEC drivers */
 	codec_clk = clk_get(&codec_dev->dev, NULL);
 	if (!IS_ERR(codec_clk)) {
@@ -474,6 +493,11 @@ static int fsl_asoc_card_probe(struct platform_device *pdev)
 		priv->codec_priv.mclk_id = WM8962_SYSCLK_MCLK;
 		priv->codec_priv.fll_id = WM8962_SYSCLK_FLL;
 		priv->codec_priv.pll_id = WM8962_FLL;
+		priv->dai_fmt |= SND_SOC_DAIFMT_CBM_CFM;
+	} else if (of_device_is_compatible(np, "fsl,imx-audio-wm8960")) {
+		priv->card.set_bias_level = fsl_asoc_card_set_bias_level;
+		priv->codec_priv.fll_id = WM8960_SYSCLK_AUTO;
+		priv->codec_priv.pll_id = WM8960_SYSCLK_AUTO;
 		priv->dai_fmt |= SND_SOC_DAIFMT_CBM_CFM;
 	} else {
 		dev_err(&pdev->dev, "unknown Device Tree compatible\n");
@@ -521,7 +545,10 @@ static int fsl_asoc_card_probe(struct platform_device *pdev)
 	/* Normal DAI Link */
 	priv->dai_link[0].cpu_of_node = cpu_np;
 	priv->dai_link[0].codec_of_node = codec_np;
-	priv->dai_link[0].codec_dai_name = codec_dev->name;
+	if (strstr(codec_dev->name, "wm8960"))
+		priv->dai_link[0].codec_dai_name = "wm8960-hifi";
+	else
+		priv->dai_link[0].codec_dai_name = codec_dev->name;
 	priv->dai_link[0].platform_of_node = cpu_np;
 	priv->dai_link[0].dai_fmt = priv->dai_fmt;
 	priv->card.num_links = 1;
@@ -530,7 +557,10 @@ static int fsl_asoc_card_probe(struct platform_device *pdev)
 		/* DPCM DAI Links only if ASRC exsits */
 		priv->dai_link[1].cpu_of_node = asrc_np;
 		priv->dai_link[1].platform_of_node = asrc_np;
-		priv->dai_link[2].codec_dai_name = codec_dev->name;
+		if (strstr(codec_dev->name, "wm8960"))
+			priv->dai_link[2].codec_dai_name = "wm8960-hifi";
+		else
+			priv->dai_link[2].codec_dai_name = codec_dev->name;
 		priv->dai_link[2].codec_of_node = codec_np;
 		priv->dai_link[2].cpu_of_node = cpu_np;
 		priv->dai_link[2].dai_fmt = priv->dai_fmt;
@@ -578,6 +608,7 @@ static const struct of_device_id fsl_asoc_card_dt_ids[] = {
 	{ .compatible = "fsl,imx-audio-cs42888", },
 	{ .compatible = "fsl,imx-audio-sgtl5000", },
 	{ .compatible = "fsl,imx-audio-wm8962", },
+	{ .compatible = "fsl,imx-audio-wm8960", },
 	{}
 };
 

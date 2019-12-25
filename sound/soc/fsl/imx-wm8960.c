@@ -25,6 +25,7 @@
 #include <linux/mfd/syscon.h>
 #include "../codecs/wm8960.h"
 #include "fsl_sai.h"
+#include "imx-audmux.h"
 
 struct imx_wm8960_data {
 	struct snd_soc_card card;
